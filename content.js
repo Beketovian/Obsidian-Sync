@@ -1,16 +1,24 @@
 (() => {
+    const origin = location.origin;
     const todayISO = new Date().toISOString().split("T")[0];
 
-    /* ----- helpers ----- */
+    /* ─── helpers ───────────────────────────────────────────── */
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitFor = (fn, ttl = 3000, step = 50) =>
+        new Promise((r) => {
+            const t0 = Date.now();
+            (function loop() {
+                const v = fn();
+                if (v || Date.now() - t0 > ttl) return r(v || null);
+                setTimeout(loop, step);
+            })();
+        });
+
     function prettyCourse(raw) {
         if (!raw) return "Other";
-        raw = raw.replace(/^Calendar:\s*/i, "").trim();
-
-        const lastColon = raw.lastIndexOf(":");
-        const lastDash = raw.lastIndexOf(" - ");
-        const idx = Math.max(lastColon, lastDash);
-        if (idx !== -1) raw = raw.slice(idx + 1);
-
+        raw = raw.replace(/^Calendar:\s*/i, "");
+        const idx = Math.max(raw.lastIndexOf(" - "), raw.lastIndexOf(":"));
+        if (idx !== -1) raw = raw.slice(idx + (raw[idx] === ":" ? 1 : 3));
         return raw
             .trim()
             .toLowerCase()
@@ -19,27 +27,27 @@
 
     const iconFor = (i) => (i?.classList.contains("icon-quiz") ? "🔼" : "⏫");
 
-    /* ----- core ----- */
-    function collect() {
-        console.log("[Canvas Sync] Starting collection…");
+    async function extractLink(a) {
+        a.dispatchEvent(
+            new MouseEvent("click", { bubbles: true, cancelable: true })
+        );
 
-        const buckets = {}; // course → [{date, line}, …]
+        const link = await waitFor(() =>
+            document.querySelector(".view_event_link")
+        );
+        const href = link?.href || "";
 
-        document.querySelectorAll("a.fc-day-grid-event").forEach((a) => {
-            // column position in current <tr>
-            const td = a.closest("td");
-            if (!td) return;
-            const col = [...td.parentElement.children].indexOf(td);
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+        return href;
+    }
 
-            // find the matching date header cell for that column
-            const table = td.closest("table");
-            const headerCell = table?.querySelector(
-                `thead td:nth-child(${col + 1})`
-            );
-            const date = headerCell?.dataset.date;
-            if (!date || date < todayISO) return; // past items skipped
+    /* ─── collector ─────────────────────────────────────────── */
+    async function collect() {
+        const buckets = {};
 
-            // accept only assignments / quizzes
+        const bars = [
+            ...document.querySelectorAll("a.fc-day-grid-event"),
+        ].filter((a) => {
             const icon = a.querySelector("i");
             if (
                 !icon ||
@@ -48,27 +56,43 @@
                     icon.classList.contains("icon-quiz")
                 )
             )
-                return;
+                return false;
 
-            const title =
-                a.getAttribute("title")?.trim() ||
-                a.querySelector(".fc-title")?.textContent.trim() ||
-                "Untitled";
-
-            const href = a.href;
-            const course = prettyCourse(
-                a.querySelector(".screenreader-only")?.textContent
-            );
-
-            const done = !!a.querySelector(".calendar__event--completed");
-            const check = done ? "- [x]" : "- [ ]";
-            const glyph = iconFor(icon);
-
-            const line = `${check} ${glyph} [${title}](${href}) 📅 ${date}`;
-            (buckets[course] ??= []).push({ date, line });
+            const td = a.closest("td");
+            const col = [...td.parentElement.children].indexOf(td);
+            const date = td
+                .closest("table")
+                ?.querySelector(`thead td:nth-child(${col + 1})`)?.dataset.date;
+            return date && date >= todayISO;
         });
 
-        /* ----- format buckets → markdown ----- */
+        for (const bar of bars) {
+            const title =
+                bar.getAttribute("title")?.trim() ||
+                bar.querySelector(".fc-title")?.textContent.trim() ||
+                "Untitled";
+
+            const td = bar.closest("td");
+            const col = [...td.parentElement.children].indexOf(td);
+            const date = td
+                .closest("table")
+                ?.querySelector(`thead td:nth-child(${col + 1})`)?.dataset.date;
+
+            const href = await extractLink(bar);
+            const course = prettyCourse(
+                bar.querySelector(".screenreader-only")?.textContent
+            );
+
+            const done = !!bar.querySelector(".calendar__event--completed");
+            const line = `${done ? "- [x]" : "- [ ]"} ${iconFor(
+                bar.querySelector("i")
+            )} [${title}](${href}) 📅 ${date}`;
+            (buckets[course] ??= []).push({ date, line });
+        }
+
+        /* TODO: extra ESC to be sure nothing is left open */
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
         const out = [];
         Object.keys(buckets)
             .sort()
@@ -79,22 +103,23 @@
                     .forEach(({ line }) => out.push(line));
                 out.push("");
             });
-
         return out;
     }
 
-    /* ----- listener for popup.js ----- */
+    /* ─── bridge to popup.js ────────────────────────────────── */
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (msg.action === "getCanvasAssignments") {
-            try {
-                sendResponse({ data: collect() });
-            } catch (e) {
-                console.error("[Canvas Sync] extraction error", e);
-                sendResponse({ data: [] });
-            }
+            (async () => {
+                try {
+                    sendResponse({ data: await collect() });
+                } catch (e) {
+                    console.error("[Canvas Sync]", e);
+                    sendResponse({ data: [] });
+                }
+            })();
+            return true; // keep channel open
         }
-        return false; // synchronous response
     });
 
-    console.log("[Canvas Sync] content.js loaded ✅");
+    console.log("[Canvas Sync] content.js ready ✅");
 })();
