@@ -3,7 +3,7 @@
     "name": "Canvas Obsidian Sync",
     "version": "1.0",
     "description": "Sync Canvas assignments to Obsidian todos.",
-    "permissions": ["activeTab", "scripting"],
+    "permissions": ["activeTab"],
     "host_permissions": ["<all_urls>"],
     "action": {
         "default_popup": "popup.html"
